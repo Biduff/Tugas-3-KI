@@ -1,10 +1,23 @@
 import socket
+import pickle
 from des import des_decrypt_ecb, des_encrypt_ecb
+import rsa
 
-HOST = '0.0.0.0'  # localhost
-PORT = 65432        # arbitrary port
+HOST = '0.0.0.0'
+PORT = 65432
 
-key = input("Enter 8-character key: ").encode("utf-8")
+def send_data(conn, payload):
+    payload_bytes = pickle.dumps(payload)
+    payload_len = len(payload_bytes).to_bytes(4, 'big')
+    conn.sendall(payload_len + payload_bytes)
+
+def recv_data(conn):
+    payload_len_bytes = conn.recv(4)
+    if not payload_len_bytes:
+        return None
+    payload_len = int.from_bytes(payload_len_bytes, 'big')
+    payload_bytes = conn.recv(payload_len)
+    return pickle.loads(payload_bytes)
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind((HOST, PORT))
@@ -14,35 +27,58 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     conn, addr = s.accept()
     with conn:
         print("Connected by", addr)
-        print("Waiting for client to talk first...")
+        
+        try:
+            print("\n[RSA] Membuat 512-bit RSA key pair...")
+            public_key, private_key = rsa.generate_key_pair(512)
+            print("[RSA] Key pair dibuat.")
 
-        while True:
-            # server menerima pesan
-            data = conn.recv(1024)
-            if not data:
-                print("\n[Client disconnected]")
-                break
+            send_data(conn, public_key)
+            print("[RSA] Public key dikirim ke client.")
+
+            encrypted_des_key = recv_data(conn)
+            if not encrypted_des_key:
+                raise Exception("Client disconnected during key exchange")
             
-            print(f"[Received Ciphertext (hex)]: {data.hex()}")
+            print("[RSA] Encrypted DES key diterima.")
+
+            key = rsa.decrypt(private_key, encrypted_des_key)
             
-            decrypted = des_decrypt_ecb(data, key).decode('utf-8', errors='ignore')
-            print(f"[Client]: {decrypted}")
+            if len(key) != 8:
+                print(f"[Warning] Decrypted key length is not 8 bytes: {len(key)}")
+                key = key.rjust(8, b'\x00')
+                
+            print(f"\n[RSA] Secret DES key established!")
+            print(f"[RSA] Derived 8-byte DES key (hex): {key.hex()}")
+            print("========================================")
 
-            if decrypted.lower() == 'exit':
-                print("[Client has disconnected]")
-                break
 
-            # server membalas
-            message = input("[You]: ")
-            plaintext = message.encode('utf-8')
-            ciphertext = des_encrypt_ecb(plaintext, key)
+            print("Waiting for client to talk first...")
+            while True:
+                data = conn.recv(1024)
+                if not data:
+                    print("\n[Client disconnected]")
+                    break
+                
+                print(f"[Received Ciphertext (hex)]: {data.hex()}")
+                
+                decrypted = des_decrypt_ecb(data, key).decode('utf-8', errors='ignore')
+                print(f"[Client]: {decrypted}")
 
-            print(f"[Sending Ciphertext (hex)]: {ciphertext.hex()}")
+                if decrypted.lower() == 'exit':
+                    break
 
-            conn.sendall(ciphertext)
-            
-            if message.lower() == 'exit':
-                print("[You have disconnected]")
-                break
+                message = input("[You]: ")
+                plaintext = message.encode('utf-8')
+                ciphertext = des_encrypt_ecb(plaintext, key)
+
+                print(f"[Sending Ciphertext (hex)]: {ciphertext.hex()}")
+                conn.sendall(ciphertext)
+                
+                if message.lower() == 'exit':
+                    break
+        
+        except Exception as e:
+            print(f"An error occurred: {e}")
 
     print("Connection closed.")
